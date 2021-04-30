@@ -1,16 +1,22 @@
 (ns join-leave.core
   (:gen-class)
   (:require [clojure.edn :as edn]
-            [clojure.core.async :refer [chan close!]]
+            [clojure.core.async :refer [chan close! go <!]]
             [discljord.messaging :as discord-rest]
             [discljord.connections :as discord-ws]
-            [discljord.events :refer [message-pump!]]))
+            [discljord.events :refer [message-pump!]]
+            [discljord.formatting :refer [user-tag]]))
 
 (def state (atom nil))
 
 (def bot-id (atom nil))
 
+(def cache (atom {}))
+
 (def config (edn/read-string (slurp "config.edn")))
+
+(def greetings-hi [
+                   ""])
 
 (defmulti handle-event (fn [type _data] type))
 
@@ -22,22 +28,29 @@
 
 (defmethod handle-event :guild-member-add
   [_ {:keys [guild-id user]}]
-  (let [channels (discord-rest/get-guild-channels! (:rest @state) guild-id)
-        text-channels (filter #(= (:type %) 0) @channels)
-        valid-names #{"join-spam" "join-leave" "hi" "welcome"}
-        channel-id (:id (first (filterv #(contains? valid-names (:name %)) text-channels)))
-        ]
-    (discord-rest/create-message! (:rest @state) channel-id 
-                                  :embed {:title (str "Hi, " (:username user) "#" (:discriminator user))})))
+  (go (let [channels (if (contains? @cache guild-id) 
+                       (get @cache guild-id) 
+                       (let [channels-to-cache (discord-rest/get-guild-channels! (:rest @state) guild-id)]
+                         (swap! cache assoc guild-id channels-to-cache)
+                         channels-to-cache))
+            text-channels (filter #(= (:type %) 0) (<! channels))
+            valid-names #{"join-spam" "join-leave" "hi" "welcome"}
+            channel-id (:id (first (filter (comp valid-names :name) text-channels)))]
+        (discord-rest/create-message! (:rest @state) channel-id
+                                      :embed {:title (str "Hi, " (user-tag user))}))))
 
 (defmethod handle-event :guild-member-remove
   [_ {:keys [guild-id user]}]
-  (let [channels (discord-rest/get-guild-channels! (:rest @state) guild-id)
-        text-channels (filter #(= (:type %) 0) @channels)
-        valid-names #{"join-spam" "join-leave" "hi" "welcome"}
-        channel-id (:id (first (filterv #(contains? valid-names (:name %)) text-channels)))]
-    (discord-rest/create-message! (:rest @state) channel-id 
-                                  :embed {:title (str "Bye, " (:username user) "#" (:discriminator user))})))
+  (go (let [channels (if (contains? @cache guild-id)
+                       (get @cache guild-id)
+                       (let [channels-to-cache (discord-rest/get-guild-channels! (:rest @state) guild-id)]
+                         (swap! cache assoc guild-id channels-to-cache)
+                         channels-to-cache))
+            text-channels (filter #(= (:type %) 0) (<! channels))
+            valid-names #{"join-spam" "join-leave" "hi" "welcome"}
+            channel-id (:id (first (filter (comp valid-names :name) text-channels)))]
+        (discord-rest/create-message! (:rest @state) channel-id
+                                      :embed {:title (str "Bye, " (user-tag user))}))))
 
 (defn start-bot! [token & intents]
   (let [event-channel (chan 100)
